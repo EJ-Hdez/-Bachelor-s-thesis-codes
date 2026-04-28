@@ -1,0 +1,285 @@
+(* =====================================================================*)(*O\
+scilador armónico cuántico 1D:\
+solución analítica vs diferencias finitas*)(* =====================================================================*)
+ClearAll["Global`*"];
+
+(*--------------------Parámetros físicos (a.u.) y numéricos--------------------*)
+
+hbar = 1.;
+mass = 1.;
+omega = 1.;
+
+xmin = -8.;
+xmax = 8.;
+
+npts = 2001;          (*puntos totales incluyendo bordes*)
+kstates = 6;          (*número de estados a calcular*)
+sampleStep = 
+  40;      (*separación de puntos para mostrar la solución numérica*)
+
+dx = (xmax - xmin)/(npts - 1);
+xs = Subdivide[xmin, xmax, npts - 1];
+
+xi = xs[[2 ;; -2]];   (*puntos interiores*)
+nint = Length[xi];
+
+(*--------------------Hamiltoniano por diferencias finitas--------------------*)
+
+lap = SparseArray[{Band[{1, 1}] -> -2., Band[{1, 2}] -> 1., 
+     Band[{2, 1}] -> 1.}, {nint, nint}]/dx^2;
+
+tOp = -(hbar^2/(2 mass)) lap;
+
+vDiag = 0.5 mass omega^2 xi^2;
+vOp = DiagonalMatrix[vDiag];
+
+hOp = 0.5 (tOp + vOp + Transpose[tOp + vOp]);
+
+(*--------------------Solver de autovalores--------------------*)
+
+eigSafe[matrix_, kval_] := 
+  Module[{vals, vecs}, 
+   Quiet@Check[{vals, vecs} = 
+      Eigensystem[matrix, kval, 
+       Method -> {"Arnoldi", "BasisSize" -> Max[30, 5 kval], 
+         "MaxIterations" -> 20000, "Tolerance" -> 10.^-12, 
+         "Shift" -> (hbar omega/2.)}];
+     {vals, vecs}, Eigensystem[Normal@matrix, kval]]];
+
+{valsNum, vecsNumIntRaw} = eigSafe[hOp, kstates];
+
+ord = Ordering[valsNum];
+valsNum = valsNum[[ord]];
+vecsNumIntRaw = vecsNumIntRaw[[ord]];
+
+(*--------------------Normalización continua--------------------*)
+
+normVec[v_] := v/Sqrt[Total[Abs[v]^2]*dx];
+
+vecsNumInt = normVec /@ vecsNumIntRaw;
+
+addBorders[v_] := Join[{0.}, v, {0.}];
+
+psisNum = addBorders /@ vecsNumInt;
+
+(* =====================================================================*)
+(*Solución analítica*)
+(* =====================================================================*)
+
+a = Sqrt[hbar/(mass omega)];
+
+(*Estado base:forma gaussiana cerrada*)
+psi0Val[x_?NumericQ] := (1/(Pi^(1/4) Sqrt[a])) Exp[-x^2/(2 a^2)];
+
+rho0Val[x_?NumericQ] := (1/(Sqrt[Pi] a)) Exp[-x^2/(a^2)];
+
+(*Estados excitados:polinomios de Hermite*)
+pref = N[(mass omega/(Pi hbar))^(1/4), 30];
+
+psiExactVal[n_Integer?Positive, x_?NumericQ] := 
+  Module[{u}, u = Sqrt[mass omega/hbar] x;
+   N[pref*(HermiteH[n, u]/Sqrt[2.^n Factorial[n]])*Exp[-u^2/2.], 30]];
+
+psisExact = 
+  Table[If[n == 0, psi0Val /@ xs, psiExactVal[n, #] & /@ xs], {n, 0, 
+    kstates - 1}];
+
+(*--------------------Alinear signo/fase--------------------*)
+
+psisNumAligned = 
+  Table[Module[{ov, sgn}, 
+    ov = Total[Conjugate[psisExact[[n + 1]]] psisNum[[n + 1]]]*dx;
+    sgn = If[Re[ov] >= 0, 1., -1.];
+    sgn psisNum[[n + 1]]], {n, 0, kstates - 1}];
+
+(*--------------------Energías exactas y errores--------------------*)
+nList = Range[0, kstates - 1];
+
+valsExact = hbar omega (nList + 1/2.);
+
+l2Diff = 
+  Table[Sqrt[
+    Total[Abs[psisNumAligned[[n + 1]] - psisExact[[n + 1]]]^2]*
+     dx], {n, 0, kstates - 1}];
+
+errorRel = (valsNum - valsExact)/valsExact;
+
+enerRows = 
+  Table[{nList[[i]], NumberForm[valsNum[[i]], {9, 6}], 
+    NumberForm[valsExact[[i]], {9, 6}], 
+    ScientificForm[errorRel[[i]], 6], 
+    ScientificForm[l2Diff[[i]], 6]}, {i, 1, Length[nList]}];
+
+enerTable = 
+  Grid[Prepend[
+    enerRows, {"n", "Enum", "Eexact", "ErrorRel", "normaL2Psi"}], 
+   Frame -> All, Alignment -> Center];
+
+(*--------------------Ortonormalidad discreta--------------------*)
+
+orthoMat = 
+  Chop@Table[
+    dx Total[Conjugate[vecsNumInt[[i]]] vecsNumInt[[j]]], {i, 
+     kstates}, {j, kstates}];
+
+(* =====================================================================*)
+(*Gráficas de densidades:analítica vs diferencias finitas*)
+(* =====================================================================*)
+
+colExact = RGBColor[0.10, 0.35, 0.90];
+colDF = Purple;
+
+markSym = "\[Times]";
+markFont = 14;
+
+legendFont = 10;
+legendPos = Scaled[{0.80, 0.80}];
+legendMargins = {{4, 4}, {3, 3}};
+
+makeLegend[] := 
+  Framed[Column[{Row[{Graphics[{colExact, Thick, Line[{{0, 0}, {1, 0}}]},
+         ImageSize -> 22], Spacer[5], Style["Analítica", legendFont]}],
+      Row[{Graphics[{Text[Style[markSym, markFont, colDF], {0.5, 0.5}]},
+         ImageSize -> 22], Spacer[5], Style["Numérica", legendFont]}]},
+     Spacings -> 0.20, Alignment -> Left], Background -> White, 
+   FrameStyle -> GrayLevel[0.85], RoundingRadius -> 3, 
+   FrameMargins -> legendMargins];
+
+densPlots = 
+  Table[Module[{n = nn, pts, exactLine, numPts, leg}, 
+    pts = Thread[{xs[[1 ;; ;; sampleStep]], 
+       Abs[psisNumAligned[[n + 1, 1 ;; ;; sampleStep]]]^2}];
+    exactLine = 
+     If[n == 0, 
+      ListLinePlot[Thread[{xs, rho0Val /@ xs}], Axes -> False, 
+       PlotStyle -> Directive[colExact, Thick], PlotRange -> All], 
+      ListLinePlot[
+       Select[Thread[{xs, Abs[psisExact[[n + 1]]]^2}], 
+        NumericQ[Last[#]] &], Axes -> False, 
+       PlotStyle -> Directive[colExact, Thick], PlotRange -> All]];
+    numPts = 
+     ListPlot[pts, Axes -> False, PlotStyle -> colDF, 
+      PlotMarkers -> {Style[markSym, markFont, colDF], markFont}];
+    leg = makeLegend[];
+    Legended[
+     Show[exactLine, numPts, Frame -> True, Axes -> False, 
+      PlotRange -> All, 
+      FrameLabel -> {Style["x (a.u.)", 12], Style["|\[Psi](x)|^2", 12]},
+       PlotLabel -> Style[Row[{"n = ", n}], 13], ImageSize -> 420], 
+     Placed[leg, legendPos]]], {nn, 0, Min[kstates - 1, 3]}];
+
+densGrid = Grid[Partition[densPlots, UpTo[2]], Spacings -> {1.2, 1.2}];
+
+(* =====================================================================*)
+(*Potencial+niveles+autofunciones*)
+(* =====================================================================*)
+
+vFun[x_] := 0.5 mass omega^2 x^2;
+
+kPlot = Min[kstates, 5];
+
+ampScale = 
+  If[kPlot >= 2, 0.35 (valsExact[[2]] - valsExact[[1]]), 0.35];
+
+makeWaveCurve[psiVec_, en_] := Thread[{xs, en + ampScale psiVec}];
+
+stateColors = {RGBColor[0.20, 0.55, 0.90], Orange, 
+   RGBColor[0.35, 0.70, 0.25], RGBColor[0.95, 0.35, 0.15], 
+   RGBColor[0.55, 0.45, 0.85]};
+
+potPlotBase = 
+  Plot[vFun[x], {x, xmin, xmax}, PlotStyle -> {Black, Thick}, 
+   Frame -> True, Axes -> False, 
+   FrameLabel -> {Style["x (a.u.)", 13], Style["Energía (a.u.)", 13]},
+    PlotRange -> {0, valsExact[[kPlot]] + 1.2}, ImageSize -> 900];
+
+levelsPlot = 
+  Graphics@
+   Table[{GrayLevel[0.55], Dashed, 
+     Line[{{xmin, valsExact[[n + 1]]}, {xmax, valsExact[[n + 1]]}}], 
+     Text[Style[Row[{"n=", n}], 11, GrayLevel[0.35]], {xmin + 0.6, 
+       valsExact[[n + 1]] + 0.08}]}, {n, 0, kPlot - 1}];
+
+turningPointsPlot = 
+  Graphics@
+   Table[Module[{xt}, xt = Sqrt[(2 valsExact[[n + 1]])/(mass omega^2)];
+     {GrayLevel[0.4], Dotted, Line[{{-xt, 0}, {-xt, valsExact[[n + 1]]}}],
+       Line[{{xt, 0}, {xt, valsExact[[n + 1]]}}]}], {n, 0, kPlot - 1}];
+
+waveExactPrims = 
+  Table[{stateColors[[n + 1]], Thick, 
+    Line[makeWaveCurve[psisExact[[n + 1]], valsExact[[n + 1]]]]}, {n, 
+    0, kPlot - 1}];
+
+sampleStepFloat = 30;
+dfMarkerSize = 12;
+
+waveDFPrims = 
+  Flatten[Table[
+    Text[Style["\[Times]", dfMarkerSize, Black], {xs[[i]], 
+      valsExact[[n + 1]] + ampScale psisNumAligned[[n + 1, i]]}], {n, 
+     0, kPlot - 1}, {i, 1, Length[xs], sampleStepFloat}], 1];
+
+(*--------------------Leyenda compacta--------------------*)
+
+legendFontFloat = 9;
+iconSizeFloat = 18;
+spacerFloat = 4;
+rowSpacingFloat = 0.10;
+frameMarginsFloat = {{3, 3}, {2, 2}};
+
+legendFloat = 
+  Framed[Column[{Row[{Graphics[{Black, Thick, Line[{{0, 0}, {1, 0}}]},
+         ImageSize -> iconSizeFloat], Spacer[spacerFloat], 
+       Style["Potencial V(x)", legendFontFloat]}], 
+     Row[{Graphics[{stateColors[[1]], Thick, Line[{{0, 0}, {1, 0}}]}, 
+        ImageSize -> iconSizeFloat], Spacer[spacerFloat], 
+       Style["\[Psi] exacta", legendFontFloat]}], 
+     Row[{Graphics[{Text[
+          Style["\[Times]", legendFontFloat + 2, Black], {0.5, 0.5}]},
+         ImageSize -> iconSizeFloat], Spacer[spacerFloat], 
+       Style["D.F.", legendFontFloat]}], 
+     Row[{Graphics[{GrayLevel[0.55], Dashed, Line[{{0, 0}, {1, 0}}]}, 
+        ImageSize -> iconSizeFloat], Spacer[spacerFloat], 
+       Style["Niveles E_n", legendFontFloat]}], 
+     Row[{Graphics[{GrayLevel[0.4], Dotted, Line[{{0, 0}, {1, 0}}]}, 
+        ImageSize -> iconSizeFloat], Spacer[spacerFloat], 
+       Style["Retorno \[PlusMinus]x_t", legendFontFloat]}]}, 
+    Spacings -> rowSpacingFloat, Alignment -> Left], 
+   Background -> White, FrameStyle -> GrayLevel[0.85], 
+   RoundingRadius -> 3, FrameMargins -> frameMarginsFloat];
+
+plotFloat = 
+  Show[potPlotBase, levelsPlot, turningPointsPlot, 
+   Epilog -> 
+    Join[waveExactPrims, 
+     waveDFPrims, {Inset[legendFloat, Scaled[{0.82, 0.82}]]}], 
+   PlotRange -> All, Axes -> False, Frame -> True, 
+   PlotLabel -> 
+    Style["Oscilador armónico: potencial, niveles, autofunciones y \
+puntos de retorno", 12]];
+
+(* =====================================================================*)
+(*Exportación*)
+(* =====================================================================*)
+
+outDir = "/home/ej-hdez/Descargas/OAC";
+
+If[! DirectoryQ[outDir], 
+  CreateDirectory[outDir, CreateIntermediateDirectories -> True]];
+
+Export[FileNameJoin[{outDir, "OAC_densidades_grid.pdf"}], densGrid];
+Export[FileNameJoin[{outDir, "OAC_potencial_autofunciones.pdf"}], 
+  plotFloat];
+Export[FileNameJoin[{outDir, "OAC_tabla_energias.pdf"}], enerTable];
+Export[FileNameJoin[{outDir, "OAC_ortonormalidad.pdf"}], 
+  MatrixForm[orthoMat]];
+
+(* =====================================================================*)
+(*Salidas en el cuaderno*)
+(* =====================================================================*)
+
+enerTable
+MatrixForm[orthoMat]
+densGrid
+plotFloat
